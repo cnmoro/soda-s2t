@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Iterable, Iterator
 
 from . import audio as _audio
+from . import chunking as _chunking
 from . import soda_api_pb2 as pb
 from . import _config
 from .download import ensure_engine, ensure_language_pack
@@ -76,15 +77,51 @@ def _find_helper() -> str:
 
 
 @dataclass
+class Word:
+    """A single recognized word with timing and speaker label."""
+
+    text: str
+    start_ms: int           # start time within the audio, in milliseconds
+    speaker: int = 1        # 1-indexed speaker label (SODA default is 1)
+
+    def __str__(self) -> str:  # pragma: no cover
+        return self.text
+
+
+@dataclass
 class Result:
     """One recognition result from the engine."""
 
     text: str
     is_final: bool
     hypotheses: list[str] = field(default_factory=list)
+    words: list[Word] = field(default_factory=list)
+    start_ms: int = 0       # segment start time within the audio, in ms
 
     def __str__(self) -> str:  # pragma: no cover - convenience
         return self.text
+
+
+def _extract_words(rr: pb.SodaRecognitionResult, *, offset_ms: int = 0) -> list[Word]:
+    """Build Word list from a recognition result's hypothesis parts.
+
+    alignment_ms is relative to the result's audio_start_time_usec; offset_ms
+    shifts everything into a global timeline (used when stitching chunks).
+    """
+    base_ms = rr.timing_metrics.audio_start_time_usec // 1000 + offset_ms
+    words: list[Word] = []
+    for part in rr.hypothesis_part:
+        if not part.text:
+            continue
+        # text[0] is the (formatted) token; a second entry is the raw form.
+        words.append(
+            Word(
+                text=part.text[0],
+                start_ms=base_ms + part.alignment_ms,
+                speaker=part.speaker_label or 1,
+            )
+        )
+    return words
 
 
 def _iter_responses(stream) -> Iterator[pb.SodaResponse]:
@@ -142,6 +179,7 @@ class SodaRecognizer:
         pcm_chunks: Iterable[bytes],
         *,
         realtime_factor: float | None = DEFAULT_REALTIME_FACTOR,
+        offset_ms: int = 0,
     ) -> Iterator[Result]:
         """Feed s16le mono 16 kHz PCM chunks; yield partial + final Results.
 
@@ -149,6 +187,9 @@ class SodaRecognizer:
         six times faster than playback). Pass None to feed as fast as possible;
         that is correct only for short clips or when the caller already paces
         the audio (e.g. a live microphone).
+
+        offset_ms shifts reported word/segment timestamps into a global
+        timeline (used when stitching parallel chunks).
         """
         with tempfile.NamedTemporaryFile(suffix=".cfg", delete=False) as tf:
             tf.write(self._config_bytes)
@@ -188,10 +229,15 @@ class SodaRecognizer:
                 rr = resp.recognition_result
                 if not rr.hypothesis:
                     continue
+                is_final = rr.result_type == pb.SodaRecognitionResult.FINAL
+                # Word-level data is only meaningful on final results.
+                words = _extract_words(rr, offset_ms=offset_ms) if is_final else []
                 yield Result(
                     text=rr.hypothesis[0],
-                    is_final=(rr.result_type == pb.SodaRecognitionResult.FINAL),
+                    is_final=is_final,
                     hypotheses=list(rr.hypothesis),
+                    words=words,
+                    start_ms=rr.timing_metrics.audio_start_time_usec // 1000 + offset_ms,
                 )
         finally:
             feeder.join(timeout=5)
@@ -200,6 +246,79 @@ class SodaRecognizer:
                 os.unlink(cfg_path)
             except OSError:
                 pass
+
+    # -- single-blob helper (used by the parallel path) -------------------
+
+    def _transcribe_blob(
+        self, pcm: bytes, *, offset_ms: int = 0,
+        realtime_factor: float | None = DEFAULT_REALTIME_FACTOR,
+    ) -> list[Result]:
+        """Transcribe one PCM blob; return its final Results.
+
+        Used for silence-bounded chunks. The feed is paced (realtime_factor) so
+        the engine captures every utterance in the chunk, not just the first;
+        parallelism across chunks provides the speed. Blocks until finished.
+        """
+        step = int(_BYTES_PER_SECOND * 0.1)
+        chunks = (pcm[i:i + step] for i in range(0, len(pcm), step))
+        return [
+            r for r in self.stream_pcm(
+                chunks, realtime_factor=realtime_factor, offset_ms=offset_ms
+            ) if r.is_final
+        ]
+
+    # -- fast parallel transcription --------------------------------------
+
+    def transcribe_detailed(
+        self,
+        source: str,
+        *,
+        max_workers: int | None = None,
+        max_chunk_s: float = 28.0,
+        noise_db: float = -30.0,
+        realtime_factor: float | None = DEFAULT_REALTIME_FACTOR,
+    ) -> list[Result]:
+        """Transcribe a file/URL fast, returning ordered final segments.
+
+        Splits the audio at silences into <= max_chunk_s chunks and transcribes
+        them in parallel, stitching results into one global timeline. Each
+        Result carries text, word timestamps and speaker labels.
+
+        Each chunk's feed is paced (realtime_factor) for completeness; the speed
+        comes from running many chunks at once. Paced workers mostly wait, so the
+        default worker count oversubscribes the CPU on purpose.
+        """
+        from concurrent.futures import ThreadPoolExecutor
+
+        pcm, silences = _chunking.decode_with_silences(source, noise_db=noise_db)
+        duration_s = len(pcm) / _BYTES_PER_SECOND
+        plan = _chunking.plan_chunks(duration_s, silences, max_chunk_s=max_chunk_s)
+        if max_workers is None:
+            # Paced workers mostly wait, but during each chunk's processing
+            # bursts too many at once saturate the CPU and make the engine fall
+            # behind its real-time assumption (dropping content). Half the cores
+            # keeps bursts from colliding while still running many chunks at once.
+            max_workers = max(2, min(8, (os.cpu_count() or 4) // 2))
+
+        def work(chunk: _chunking.Chunk) -> tuple[int, list[Result]]:
+            blob = _chunking.slice_pcm(pcm, chunk)
+            if not blob:
+                return chunk.index, []
+            return chunk.index, self._transcribe_blob(
+                blob, offset_ms=chunk.start_ms, realtime_factor=realtime_factor
+            )
+
+        results: list[tuple[int, list[Result]]] = []
+        if len(plan) == 1 or max_workers == 1:
+            results = [work(c) for c in plan]
+        else:
+            with ThreadPoolExecutor(max_workers=max_workers) as pool:
+                results = list(pool.map(work, plan))
+
+        ordered: list[Result] = []
+        for _, segs in sorted(results, key=lambda t: t[0]):
+            ordered.extend(segs)
+        return ordered
 
     # -- convenience wrappers ---------------------------------------------
 
@@ -210,7 +329,11 @@ class SodaRecognizer:
         chunk_ms: int = 100,
         realtime_factor: float | None = DEFAULT_REALTIME_FACTOR,
     ) -> Iterator[Result]:
-        """Transcribe a file/URL, yielding Results as they arrive."""
+        """Transcribe a file/URL, yielding Results in order as they arrive.
+
+        Uses paced streaming (one engine session). Good for live display; for
+        the fastest whole-file transcription use transcribe()/transcribe_detailed().
+        """
         return self.stream_pcm(
             _audio.stream_pcm(source, chunk_ms=chunk_ms),
             realtime_factor=realtime_factor,
@@ -220,7 +343,6 @@ class SodaRecognizer:
         self, pcm: bytes, *, realtime_factor: float | None = DEFAULT_REALTIME_FACTOR
     ) -> str:
         """Transcribe raw PCM, returning the concatenated final text."""
-        # Split into chunks so pacing applies; one giant write defeats it.
         step = int(_BYTES_PER_SECOND * 0.1)
         chunks = [pcm[i:i + step] for i in range(0, len(pcm), step)]
         finals = [
@@ -231,9 +353,22 @@ class SodaRecognizer:
         return " ".join(finals).strip()
 
     def transcribe(
-        self, source: str, *, realtime_factor: float | None = DEFAULT_REALTIME_FACTOR
+        self,
+        source: str,
+        *,
+        fast: bool = True,
+        max_workers: int | None = None,
+        realtime_factor: float | None = DEFAULT_REALTIME_FACTOR,
     ) -> str:
-        """Transcribe a file/URL, returning the concatenated final text."""
+        """Transcribe a file/URL, returning the full text.
+
+        By default uses the fast parallel (silence-chunked) path. Set fast=False
+        to use single-session paced streaming instead (e.g. for inputs ffmpeg
+        cannot seek/duration-probe, or to avoid chunk boundaries entirely).
+        """
+        if fast:
+            segs = self.transcribe_detailed(source, max_workers=max_workers)
+            return " ".join(s.text for s in segs).strip()
         finals = [
             r.text
             for r in self.stream(source, realtime_factor=realtime_factor)

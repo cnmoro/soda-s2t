@@ -8,11 +8,12 @@ Quick start:
 
 from ._config import MODE_CAPTION, MODE_IME, SODA_API_KEY
 from .download import ensure_engine, ensure_language_pack
-from .engine import Result, SodaRecognizer
+from .engine import Result, SodaRecognizer, Word
 
 __all__ = [
     "SodaRecognizer",
     "Result",
+    "Word",
     "ensure_engine",
     "ensure_language_pack",
     "MODE_CAPTION",

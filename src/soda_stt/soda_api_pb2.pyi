@@ -121,12 +121,14 @@ class TimingMetrics(_message.Message):
     def __init__(self, audio_start_epoch_usec: _Optional[int] = ..., audio_start_time_usec: _Optional[int] = ..., elapsed_wall_time_usec: _Optional[int] = ..., event_end_time_usec: _Optional[int] = ...) -> None: ...
 
 class HypothesisPart(_message.Message):
-    __slots__ = ("text", "alignment_ms")
+    __slots__ = ("text", "alignment_ms", "speaker_label")
     TEXT_FIELD_NUMBER: _ClassVar[int]
     ALIGNMENT_MS_FIELD_NUMBER: _ClassVar[int]
+    SPEAKER_LABEL_FIELD_NUMBER: _ClassVar[int]
     text: _containers.RepeatedScalarFieldContainer[str]
     alignment_ms: int
-    def __init__(self, text: _Optional[_Iterable[str]] = ..., alignment_ms: _Optional[int] = ...) -> None: ...
+    speaker_label: int
+    def __init__(self, text: _Optional[_Iterable[str]] = ..., alignment_ms: _Optional[int] = ..., speaker_label: _Optional[int] = ...) -> None: ...
 
 class SodaRecognitionResult(_message.Message):
     __slots__ = ("hypothesis", "result_type", "endpoint_reason", "timing_metrics", "hypothesis_part")

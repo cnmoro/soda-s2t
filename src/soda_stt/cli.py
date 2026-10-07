@@ -1,18 +1,57 @@
-"""Command-line interface: python -m soda_stt ..."""
+"""Command-line interface: python -m soda_stt ... (or the `soda-stt` command)."""
 
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 
 from . import __version__
 from .download import ensure_engine, ensure_language_pack
-from .engine import DEFAULT_REALTIME_FACTOR, SodaRecognizer
+from .engine import DEFAULT_REALTIME_FACTOR, Result, SodaRecognizer
+
+
+def _fmt_ts(ms: int) -> str:
+    s, ms = divmod(int(ms), 1000)
+    h, s = divmod(s, 60 * 60)
+    m, s = divmod(s, 60)
+    return f"{h:02d}:{m:02d}:{s:02d},{ms:03d}"
+
+
+def _emit_srt(segs: list[Result]) -> str:
+    lines = []
+    for i, seg in enumerate(segs, 1):
+        start = seg.words[0].start_ms if seg.words else seg.start_ms
+        last_word = seg.words[-1].start_ms if seg.words else seg.start_ms
+        # End 2s after the last word, but never past the next cue's start.
+        end = last_word + 2000
+        if i < len(segs):
+            nxt = segs[i]
+            nxt_start = nxt.words[0].start_ms if nxt.words else nxt.start_ms
+            end = min(end, max(nxt_start - 1, start + 1))
+        spk = f"[S{seg.words[0].speaker}] " if seg.words else ""
+        lines.append(f"{i}\n{_fmt_ts(start)} --> {_fmt_ts(end)}\n{spk}{seg.text.strip()}\n")
+    return "\n".join(lines)
+
+
+def _emit_json(segs: list[Result]) -> str:
+    out = [
+        {
+            "start_ms": seg.start_ms,
+            "text": seg.text,
+            "words": [
+                {"text": w.text, "start_ms": w.start_ms, "speaker": w.speaker}
+                for w in seg.words
+            ],
+        }
+        for seg in segs
+    ]
+    return json.dumps(out, ensure_ascii=False, indent=2)
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
-        prog="soda_stt",
+        prog="soda-stt",
         description="On-device speech-to-text with Chrome's SODA engine.",
     )
     parser.add_argument("--version", action="version", version=__version__)
@@ -22,11 +61,26 @@ def main(argv: list[str] | None = None) -> int:
     p_tr.add_argument("source", help="audio file path or URL (any ffmpeg input)")
     p_tr.add_argument("-l", "--locale", default="pt-BR", help="language (default pt-BR)")
     p_tr.add_argument(
-        "--realtime-factor", type=float, default=DEFAULT_REALTIME_FACTOR,
-        help="feed pace as a multiple of real time (0 = as fast as possible)",
+        "-f", "--format", choices=["text", "json", "srt"], default="text",
+        help="output format (default text)",
     )
     p_tr.add_argument(
-        "--partials", action="store_true", help="print partial results live to stderr",
+        "-o", "--output", help="write to this file instead of stdout",
+    )
+    p_tr.add_argument(
+        "--workers", type=int, default=None, help="parallel workers (default: cores/2)",
+    )
+    p_tr.add_argument(
+        "--max-speakers", type=int, default=0,
+        help="enable speaker diarization with up to N speakers (experimental)",
+    )
+    p_tr.add_argument(
+        "--no-fast", action="store_true",
+        help="use single-session paced streaming instead of parallel chunking",
+    )
+    p_tr.add_argument(
+        "--realtime-factor", type=float, default=DEFAULT_REALTIME_FACTOR,
+        help="feed pace as a multiple of real time",
     )
 
     p_dl = sub.add_parser("download", help="pre-fetch the engine and a language pack")
@@ -36,27 +90,37 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.cmd == "download":
         print("Fetching SODA engine...", file=sys.stderr)
-        lib = ensure_engine()
-        print(f"  engine: {lib}", file=sys.stderr)
+        print(f"  engine: {ensure_engine()}", file=sys.stderr)
         print(f"Fetching {args.locale} language pack...", file=sys.stderr)
-        models = ensure_language_pack(args.locale)
-        print(f"  models: {models}", file=sys.stderr)
+        print(f"  models: {ensure_language_pack(args.locale)}", file=sys.stderr)
         return 0
 
     if args.cmd == "transcribe":
-        rec = SodaRecognizer.for_locale(args.locale)
-        factor = args.realtime_factor or None
-        if args.partials:
-            finals = []
-            for r in rec.stream(args.source, realtime_factor=factor):
-                if r.is_final:
-                    finals.append(r.text)
-                else:
-                    print(f"\r… {r.text[-100:]}", end="", file=sys.stderr, flush=True)
-            print("", file=sys.stderr)
-            print(" ".join(finals).strip())
+        rec = SodaRecognizer.for_locale(args.locale, max_speaker_count=args.max_speakers)
+
+        if args.no_fast:
+            # Paced single session; collect finals as segments.
+            segs = [r for r in rec.stream(args.source, realtime_factor=args.realtime_factor)
+                    if r.is_final]
         else:
-            print(rec.transcribe(args.source, realtime_factor=factor))
+            segs = rec.transcribe_detailed(
+                args.source, max_workers=args.workers,
+                realtime_factor=args.realtime_factor,
+            )
+
+        if args.format == "text":
+            out = " ".join(s.text for s in segs).strip()
+        elif args.format == "srt":
+            out = _emit_srt(segs)
+        else:
+            out = _emit_json(segs)
+
+        if args.output:
+            with open(args.output, "w", encoding="utf-8") as f:
+                f.write(out + "\n")
+            print(f"wrote {args.output}", file=sys.stderr)
+        else:
+            print(out)
         return 0
 
     return 1

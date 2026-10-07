@@ -104,6 +104,32 @@ reads audio from stdin; the Python feeder paces writes to a configurable
 multiple of real time (`realtime_factor`, default 6). Around 4–6× the transcript
 converges to a stable, complete result on a typical desktop CPU.
 
+## Word timestamps and speaker labels (undeclared proto field)
+
+`SodaRecognitionResult.hypothesis_part[]` gives per-word data. Chromium's copy of
+the proto declares only `text` (1) and `alignment_ms` (2), but scanning the raw
+bytes `libsoda.so` emits revealed an **undeclared field 5** (varint) on every
+part. Testing showed it is a **1-indexed speaker label**: constant (`1`) on
+single-speaker audio and taking values `{0,1,…}` across speakers when
+`SPEAKER_LABEL_DETECTION` is set. `soda_api.proto` here adds it back as
+`speaker_label = 5`. Combined with `alignment_ms` (offset from the result's
+`timing_metrics.audio_start_time_usec`) this yields word-level timestamps and
+diarization. Diarization accuracy is model-dependent and modest; the labels are
+only consistent within one engine session.
+
+## Fast parallel transcription
+
+Because the engine finalizes once per bulk-fed stream, throughput of a single
+paced session is bounded (~6× real time). Measured behaviour: a silence-bounded
+clip up to ~30 s transcribes essentially completely, and the engine runs about
+8× real time per stream. So the library splits long audio at silences (ffmpeg
+`silencedetect`, one pass that also yields the PCM) into ≤28 s chunks and
+transcribes them concurrently, each still paced for completeness, then stitches
+the segments with corrected timestamps. This reaches ~37× real time on 8 cores.
+Over-parallelising hurts: when the paced processing bursts collide the engine
+falls behind its real-time assumption and drops words, so the default worker
+count is half the cores.
+
 ## Architecture
 
 ```

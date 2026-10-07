@@ -179,6 +179,11 @@ message HypothesisPart {
   // Offset in ms of the beginning of this part of the hypothesis from this
   // events audio_start_time_usec.
   optional int64 alignment_ms = 2;
+  // Per-word speaker label. Not present in Chromium's copy of this proto, but
+  // libsoda.so populates it (observed via reverse engineering). It is 1-indexed
+  // (speaker 1 by default); with SPEAKER_LABEL_DETECTION enabled and multiple
+  // speakers, it changes across speaker turns.
+  optional int32 speaker_label = 5;
 }
 
 // Next id: 6
