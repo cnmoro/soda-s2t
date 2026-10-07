@@ -8,8 +8,12 @@ time. First-class support for Brazilian Portuguese (`pt-BR`).
 The engine is Google's **SODA** (Speech On-Device API), shipped as `libsoda.so`.
 This library downloads the engine and language models straight from Chrome's
 public component-update service, then drives the engine through a small native
-helper. See [docs/REVERSE_ENGINEERING.md](docs/REVERSE_ENGINEERING.md) for how
-it works and how it was figured out.
+helper.
+
+- [docs/MODEL.md](docs/MODEL.md) — how Google publishes the model, how it's
+  downloaded, and how it integrates here.
+- [docs/REVERSE_ENGINEERING.md](docs/REVERSE_ENGINEERING.md) — the engine ABI,
+  the "called by Chrome" gate, timestamps/diarization, and the fast path.
 
 ## Requirements
 

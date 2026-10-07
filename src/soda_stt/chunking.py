@@ -32,41 +32,76 @@ class Chunk:
         return int(self.start_s * 1000)
 
 
-def decode_with_silences(
-    source: str,
-    *,
-    noise_db: float = -30.0,
-    min_silence_s: float = 0.4,
-) -> tuple[bytes, list[tuple[float, float]]]:
-    """Decode to 16 kHz mono s16le PCM and detect silences in one ffmpeg pass.
-
-    Returns (pcm_bytes, silences) where silences is a list of (start_s, end_s).
-    """
-    ffmpeg = shutil.which("ffmpeg")
-    if not ffmpeg:
-        raise RuntimeError("ffmpeg not found on PATH; required for chunking.")
-    cmd = [
-        ffmpeg, "-nostdin", "-i", source,
-        "-af", f"silencedetect=noise={noise_db}dB:d={min_silence_s}",
-        "-ac", str(CHANNELS), "-ar", str(SAMPLE_RATE), "-f", "s16le", "-",
-    ]
-    proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-    if proc.returncode != 0:
-        raise RuntimeError(
-            f"ffmpeg failed on {source!r}: "
-            f"{proc.stderr.decode(errors='replace').strip()[:500]}"
-        )
-    pcm = proc.stdout
+def _parse_silences(stderr_text: str) -> list[tuple[float, float]]:
     silences: list[tuple[float, float]] = []
     cur_start: float | None = None
-    for m in _SILENCE_RE.finditer(proc.stderr.decode(errors="replace")):
+    for m in _SILENCE_RE.finditer(stderr_text):
         kind, value = m.group(1), float(m.group(2))
         if kind == "start":
             cur_start = value
         elif kind == "end" and cur_start is not None:
             silences.append((cur_start, value))
             cur_start = None
-    return pcm, silences
+    return silences
+
+
+def _ffmpeg_cmd(source: str, out: str, noise_db: float, min_silence_s: float) -> list[str]:
+    ffmpeg = shutil.which("ffmpeg")
+    if not ffmpeg:
+        raise RuntimeError("ffmpeg not found on PATH; required for chunking.")
+    return [
+        ffmpeg, "-nostdin", "-y", "-i", source,
+        "-af", f"silencedetect=noise={noise_db}dB:d={min_silence_s}",
+        "-ac", str(CHANNELS), "-ar", str(SAMPLE_RATE), "-f", "s16le", out,
+    ]
+
+
+def decode_to_file(
+    source: str,
+    out_path: str,
+    *,
+    noise_db: float = -30.0,
+    min_silence_s: float = 0.4,
+) -> tuple[float, list[tuple[float, float]]]:
+    """Decode to a 16 kHz mono s16le PCM file and detect silences in one pass.
+
+    Writes the PCM straight to out_path (never holding it in memory) and returns
+    (duration_s, silences). Workers then read only their byte range via
+    read_chunk(), keeping RAM independent of the recording's length.
+    """
+    import os
+
+    cmd = _ffmpeg_cmd(source, out_path, noise_db, min_silence_s)
+    proc = subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+    if proc.returncode != 0:
+        raise RuntimeError(
+            f"ffmpeg failed on {source!r}: "
+            f"{proc.stderr.decode(errors='replace').strip()[:500]}"
+        )
+    silences = _parse_silences(proc.stderr.decode(errors="replace"))
+    duration_s = os.path.getsize(out_path) / _BYTES_PER_SECOND
+    return duration_s, silences
+
+
+def decode_with_silences(
+    source: str,
+    *,
+    noise_db: float = -30.0,
+    min_silence_s: float = 0.4,
+) -> tuple[bytes, list[tuple[float, float]]]:
+    """Decode to in-memory PCM and detect silences in one pass.
+
+    Convenience for short inputs; for long audio prefer decode_to_file(), which
+    does not buffer the whole stream.
+    """
+    cmd = _ffmpeg_cmd(source, "-", noise_db, min_silence_s)
+    proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    if proc.returncode != 0:
+        raise RuntimeError(
+            f"ffmpeg failed on {source!r}: "
+            f"{proc.stderr.decode(errors='replace').strip()[:500]}"
+        )
+    return proc.stdout, _parse_silences(proc.stderr.decode(errors="replace"))
 
 
 def plan_chunks(
@@ -97,8 +132,21 @@ def plan_chunks(
     return chunks
 
 
-def slice_pcm(pcm: bytes, chunk: Chunk) -> bytes:
-    """Byte-exact slice of the decoded PCM for a chunk."""
+def _byte_range(chunk: Chunk) -> tuple[int, int]:
     lo = int(chunk.start_s * _BYTES_PER_SECOND) & ~1  # keep sample alignment
     hi = int(chunk.end_s * _BYTES_PER_SECOND) & ~1
+    return lo, hi
+
+
+def slice_pcm(pcm: bytes, chunk: Chunk) -> bytes:
+    """Byte-exact slice of in-memory PCM for a chunk."""
+    lo, hi = _byte_range(chunk)
     return pcm[lo:hi]
+
+
+def read_chunk(path: str, chunk: Chunk) -> bytes:
+    """Read only a chunk's byte range from a PCM file (seek + bounded read)."""
+    lo, hi = _byte_range(chunk)
+    with open(path, "rb") as f:
+        f.seek(lo)
+        return f.read(hi - lo)

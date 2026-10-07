@@ -290,30 +290,40 @@ class SodaRecognizer:
         """
         from concurrent.futures import ThreadPoolExecutor
 
-        pcm, silences = _chunking.decode_with_silences(source, noise_db=noise_db)
-        duration_s = len(pcm) / _BYTES_PER_SECOND
-        plan = _chunking.plan_chunks(duration_s, silences, max_chunk_s=max_chunk_s)
-        if max_workers is None:
-            # Paced workers mostly wait, but during each chunk's processing
-            # bursts too many at once saturate the CPU and make the engine fall
-            # behind its real-time assumption (dropping content). Half the cores
-            # keeps bursts from colliding while still running many chunks at once.
-            max_workers = max(2, min(8, (os.cpu_count() or 4) // 2))
-
-        def work(chunk: _chunking.Chunk) -> tuple[int, list[Result]]:
-            blob = _chunking.slice_pcm(pcm, chunk)
-            if not blob:
-                return chunk.index, []
-            return chunk.index, self._transcribe_blob(
-                blob, offset_ms=chunk.start_ms, realtime_factor=realtime_factor
+        # Decode once to a temp PCM file (not memory); each worker reads only its
+        # own byte range, so RAM stays independent of the recording's length.
+        fd, pcm_path = tempfile.mkstemp(suffix=".pcm")
+        os.close(fd)
+        try:
+            duration_s, silences = _chunking.decode_to_file(
+                source, pcm_path, noise_db=noise_db
             )
+            plan = _chunking.plan_chunks(duration_s, silences, max_chunk_s=max_chunk_s)
+            if max_workers is None:
+                # Paced workers mostly wait, but during each chunk's processing
+                # bursts too many at once saturate the CPU and make the engine
+                # fall behind its real-time assumption (dropping content). Half
+                # the cores keeps bursts from colliding while running many at once.
+                max_workers = max(2, min(8, (os.cpu_count() or 4) // 2))
 
-        results: list[tuple[int, list[Result]]] = []
-        if len(plan) == 1 or max_workers == 1:
-            results = [work(c) for c in plan]
-        else:
-            with ThreadPoolExecutor(max_workers=max_workers) as pool:
-                results = list(pool.map(work, plan))
+            def work(chunk: _chunking.Chunk) -> tuple[int, list[Result]]:
+                blob = _chunking.read_chunk(pcm_path, chunk)
+                if not blob:
+                    return chunk.index, []
+                return chunk.index, self._transcribe_blob(
+                    blob, offset_ms=chunk.start_ms, realtime_factor=realtime_factor
+                )
+
+            if len(plan) == 1 or max_workers == 1:
+                results = [work(c) for c in plan]
+            else:
+                with ThreadPoolExecutor(max_workers=max_workers) as pool:
+                    results = list(pool.map(work, plan))
+        finally:
+            try:
+                os.unlink(pcm_path)
+            except OSError:
+                pass
 
         ordered: list[Result] = []
         for _, segs in sorted(results, key=lambda t: t[0]):
