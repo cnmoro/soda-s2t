@@ -67,8 +67,8 @@ text = rec.transcribe("entrevista.mp3")
 print(text)
 ```
 
-On an 8-core desktop a 55-minute recording transcribes in about 90 seconds
-(~37x real time), complete and correctly punctuated.
+On an 8-core desktop a 55-minute recording transcribes in about 86 seconds
+(~38x real time), complete and correctly punctuated.
 
 ### Word timestamps and segments
 
@@ -111,7 +111,8 @@ soda-stt transcribe odd.aac --no-fast          # single-session paced streaming
 ## How it's fast, and the pacing knob
 
 SODA assumes audio arrives at roughly real time: fed a whole file at once it
-finalizes once and drops the rest. Two consequences:
+finalizes once and drops the rest. Its encoder also costs the same for silent
+frames as for speech. Both shape the design:
 
 - **Parallel path (default).** The audio is split at silences into ~28-second
   chunks that are transcribed concurrently. Each chunk is still fed at a bounded
@@ -120,10 +121,18 @@ finalizes once and drops the rest. Two consequences:
   defaults to half your cores — raising it too high makes the engine fall behind
   during processing bursts and lose words, so more workers is not always better.
 
+- **Silent audio is never fed.** Inside a chunk, pauses ffmpeg flags (≥0.4 s
+  below −30 dB) are dropped before the engine sees them and word timestamps are
+  mapped back onto the original timeline (median error ~13 ms). Pauses longer
+  than 1 s are kept: SODA's endpointer needs them to cut segments. Worth ~6% on
+  the whole pipeline — and because there is less audio to process under
+  contention, slightly *more* words come back, not fewer.
+
 - **Single-session path** (`stream()`, or `transcribe(..., fast=False)`). One
-  paced session, results strictly in order. Best for live display and for inputs
-  ffmpeg can't probe. A 60-minute file takes about 10 minutes at the default
-  pace.
+  paced session, results strictly in order, with the CPU to itself — so it is
+  fed faster (`realtime_factor`, default `8`). Best for live display and for
+  inputs ffmpeg can't probe. A 60-minute file takes about 7½ minutes at the
+  default pace.
 
 For a live microphone you already produce audio in real time, so pass
 `realtime_factor=None` to `stream_pcm` and feed chunks as they arrive (see

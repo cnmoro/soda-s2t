@@ -8,7 +8,7 @@ import sys
 
 from . import __version__
 from .download import ensure_engine, ensure_language_pack
-from .engine import DEFAULT_REALTIME_FACTOR, Result, SodaRecognizer
+from .engine import Result, SodaRecognizer
 
 
 def _fmt_ts(ms: int) -> str:
@@ -79,8 +79,8 @@ def main(argv: list[str] | None = None) -> int:
         help="use single-session paced streaming instead of parallel chunking",
     )
     p_tr.add_argument(
-        "--realtime-factor", type=float, default=DEFAULT_REALTIME_FACTOR,
-        help="feed pace as a multiple of real time",
+        "--realtime-factor", type=float, default=None,
+        help="feed pace as a multiple of real time (default: 6 parallel, 8 single-session)",
     )
 
     p_dl = sub.add_parser(
@@ -105,15 +105,19 @@ def main(argv: list[str] | None = None) -> int:
     if args.cmd == "transcribe":
         rec = SodaRecognizer.for_locale(args.locale, max_speaker_count=args.max_speakers)
 
+        # None → each path's own default (6x parallel, 8x single session);
+        # passing None to the engine itself would mean "no pacing at all".
         if args.no_fast:
-            # Paced single session; collect finals as segments.
-            segs = [r for r in rec.stream(args.source, realtime_factor=args.realtime_factor)
-                    if r.is_final]
-        else:
-            segs = rec.transcribe_detailed(
-                args.source, max_workers=args.workers,
-                realtime_factor=args.realtime_factor,
+            kwargs = (
+                {} if args.realtime_factor is None
+                else {"realtime_factor": args.realtime_factor}
             )
+            segs = [r for r in rec.stream(args.source, **kwargs) if r.is_final]
+        else:
+            kwargs = {"max_workers": args.workers}
+            if args.realtime_factor is not None:
+                kwargs["realtime_factor"] = args.realtime_factor
+            segs = rec.transcribe_detailed(args.source, **kwargs)
 
         if args.format == "text":
             out = " ".join(s.text for s in segs).strip()

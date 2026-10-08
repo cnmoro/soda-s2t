@@ -204,3 +204,50 @@ def test_speech_transcribes_with_network_blocked(monkeypatch):
     text = rec.transcribe(str(SPEECH_CLIP))
     assert len(text) > 50
     assert text.lower().startswith("brasil")
+
+
+# -- speed path: silence skipping + timestamp mapping -----------------------
+
+
+def test_feed_plan_skips_silence_and_keeps_padding():
+    from soda_stt import chunking as ck
+
+    chunk = ck.Chunk(0, 0.0, 10.0)
+    silences = [(2.0, 3.0), (5.0, 5.5)]
+    plan = ck.feed_plan(chunk, silences, pad_s=0.15)
+    # Speech before the first pause, the pause itself dropped (minus pad),
+    # speech between pauses, second pause dropped, speech to the end.
+    assert plan == [(0.0, 2.0), (3.0 - 0.15, 5.0), (5.5 - 0.15, 10.0)]
+    fed = sum(b - a for a, b in plan)
+    assert fed < 10.0  # the point: silent frames are not fed
+    assert all(b > a for a, b in plan)
+
+
+def test_feed_plan_keeps_long_pauses_for_the_endpointer():
+    from soda_stt import chunking as ck
+
+    chunk = ck.Chunk(0, 0.0, 10.0)
+    silences = [(2.0, 3.0), (5.0, 8.0)]  # 1 s pause vs 3 s pause
+    plan = ck.feed_plan(chunk, silences, pad_s=0.15, max_skip_s=2.0)
+    # Short pause skipped; the long one is fed whole so SODA still cuts segments.
+    assert plan == [(0.0, 2.0), (3.0 - 0.15, 10.0)]
+
+
+def test_feed_plan_without_silence_is_a_contiguous_chunk():
+    from soda_stt import chunking as ck
+
+    chunk = ck.Chunk(3, 30.0, 45.0)
+    assert ck.feed_plan(chunk, []) == [(30.0, 45.0)]
+
+
+def test_map_time_reconstructs_the_original_timeline():
+    from soda_stt.engine import _map_time
+
+    # Two fed segments: [0..2000ms) at t=0, [4000..6000ms) at session 2000.
+    tm = [(0, 4000), (2000, 9000)]
+    assert _map_time(None, 123, offset_ms=7) == 130      # plain offset fallback
+    assert _map_time(tm, 0) == 4000                      # segment start
+    assert _map_time(tm, 1500) == 5500                   # inside segment 1
+    assert _map_time(tm, 2000) == 9000                   # segment 2 start
+    assert _map_time(tm, 3500) == 10500                  # inside segment 2
+    assert _map_time(None, 500) == 500                   # no map: identity
