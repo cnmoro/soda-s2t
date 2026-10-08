@@ -1,7 +1,7 @@
 """Constants and config-message construction for the SODA engine.
 
 Values are what Chrome itself uses to invoke the bundled on-device speech
-engine; see docs/REVERSE_ENGINEERING.md for how they were derived.
+engine.
 """
 
 from __future__ import annotations

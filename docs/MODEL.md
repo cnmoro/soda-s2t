@@ -2,8 +2,7 @@
 
 This explains where the on-device speech model comes from, the exact mechanism
 Google uses to publish and deliver it, and how `soda-stt` fetches, bundles,
-caches, and feeds it to the engine. For the engine ABI and the "called by
-Chrome" gate, see [REVERSE_ENGINEERING.md](REVERSE_ENGINEERING.md).
+caches, and feeds it to the engine.
 
 ## What the "model" actually is
 
