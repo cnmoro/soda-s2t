@@ -83,16 +83,23 @@ def main(argv: list[str] | None = None) -> int:
         help="feed pace as a multiple of real time",
     )
 
-    p_dl = sub.add_parser("download", help="pre-fetch the engine and a language pack")
+    p_dl = sub.add_parser(
+        "download", help="make sure the engine and a language pack are available locally"
+    )
     p_dl.add_argument("-l", "--locale", default="pt-BR")
+    p_dl.add_argument(
+        "--force", action="store_true",
+        help="check the update service even when a bundled or cached copy exists",
+    )
 
     args = parser.parse_args(argv)
 
     if args.cmd == "download":
-        print("Fetching SODA engine...", file=sys.stderr)
-        print(f"  engine: {ensure_engine()}", file=sys.stderr)
-        print(f"Fetching {args.locale} language pack...", file=sys.stderr)
-        print(f"  models: {ensure_language_pack(args.locale)}", file=sys.stderr)
+        print("Resolving SODA engine...", file=sys.stderr)
+        print(f"  engine: {ensure_engine(force=args.force)}", file=sys.stderr)
+        print(f"Resolving {args.locale} language pack...", file=sys.stderr)
+        print(f"  models: {ensure_language_pack(args.locale, force=args.force)}",
+              file=sys.stderr)
         return 0
 
     if args.cmd == "transcribe":

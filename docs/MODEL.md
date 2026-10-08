@@ -1,9 +1,9 @@
 # The SODA model: how Google ships it and how this project gets it
 
 This explains where the on-device speech model comes from, the exact mechanism
-Google uses to publish and deliver it, and how `soda-stt` fetches, caches, and
-feeds it to the engine. For the engine ABI and the "called by Chrome" gate, see
-[REVERSE_ENGINEERING.md](REVERSE_ENGINEERING.md).
+Google uses to publish and deliver it, and how `soda-stt` fetches, bundles,
+caches, and feeds it to the engine. For the engine ABI and the "called by
+Chrome" gate, see [REVERSE_ENGINEERING.md](REVERSE_ENGINEERING.md).
 
 ## What the "model" actually is
 
@@ -124,21 +124,85 @@ the update service delivers over HTTPS.)
 
 All of the above lives in [`src/soda_stt/download.py`](../src/soda_stt/download.py).
 
-### Fetch + cache
+### Resolution order: offline first
 
-- `ensure_engine()` → does an update check for the engine component, downloads
-  the CRX3 if not already cached, verifies its SHA-256, extracts it, and returns
-  the path to `libsoda.so`.
-- `ensure_language_pack(locale)` → the same for a language pack, returning the
-  `SODAModels/` directory.
+`ensure_engine()` and `ensure_language_pack(locale)` walk three steps and only
+reach the network on the last one:
 
-Both are idempotent: if the current version is already extracted they return
-immediately; pass `force=True` to refresh. Downloaded CRX3s are kept in a cache
-so re-extraction is free.
+1. **Bundled copy** — the artifacts staged inside the installed package at
+   `src/soda_stt/_bundle/` (next section). Used in place, read-only, no cache
+   directory involved.
+2. **Local cache** — whatever an earlier download left under `SODA_STT_HOME`;
+   the newest version directory wins.
+3. **Component updater** — update check, CRX3 download, SHA-256 verification,
+   extraction, exactly as described above.
+
+So a wheel built from a bundle never opens a socket at inference time —
+[`tests/test_offline.py`](../tests/test_offline.py) asserts that with
+`socket.connect` and `urllib` patched to raise. Pass `force=True` (or run
+`soda-stt download --force`) to skip steps 1–2 and look for a newer version.
+
+Both functions stay idempotent, and downloaded CRX3s are kept in a cache so
+re-extraction is free.
+
+### Bundling the artifacts into the wheel
+
+`uv run python scripts/bundle.py` stages the components into the package:
+
+```
+src/soda_stt/
+  _bundle/
+    bundle.json                  # versions, component ids, hashes, sizes
+    SODAFiles/libsoda.so         # the engine
+    <locale>/SODAModels/…        # one directory per staged locale (pt-BR)
+  soda_helper                    # the native helper, compiled by the script
+```
+
+Its sources are the local CRX3s under `artifacts/crx/` (preferred, so the bytes
+are exactly what Google published) or an already-extracted component tree — the
+bundler itself never downloads. `--pack LOCALE=PATH.crx3` stages additional
+locales, `--clean` removes the bundle, and `bundle.json` records a SHA-256 (plus
+file count and total size for packs) so the staged tree can be verified later.
+
+hatchling packages everything under `src/soda_stt/`, so
+
+```bash
+uv run python scripts/bundle.py && uv build
+```
+
+produces both a self-contained wheel and sdist (~92 MB compressed each, ~192 MB
+installed). A build hook ([`hatch_build.py`](../hatch_build.py)) tags the wheel
+`py3-none-<platform>` — the payload is a Linux x86-64 ELF, so the package is
+never universal. The bundle is gitignored: the artifacts are the product, not
+the git tree; the sdist pulls it back in with `force-include`.
+
+### Publishing
+
+`scripts/build_release.sh` runs the whole flow:
+
+1. `scripts/bundle.py` — stage the components and compile the helper.
+2. `uv build` — the sdist first, then a wheel built *from* it, so both carry
+   the bundle.
+3. `uvx --with patchelf auditwheel repair` — **PyPI rejects plain
+   `linux_x86_64`**: its allowlist only takes `any`, Windows, macOS,
+   `manylinux_*` and `musllinux_*`, so an upload would fail with HTTP 400.
+   auditwheel reads the ELF symbol versions, computes the real glibc floor and
+   retags — today `manylinux_2_34_x86_64`. The floor comes from our own
+   `soda_helper` (built on glibc 2.39, references `GLIBC_2.34`); `libsoda.so`
+   alone needs only `GLIBC_2.27`, so building the helper in a manylinux
+   container would drop the floor to `manylinux_2_27_x86_64`.
+4. `uvx twine check` — validates the metadata that becomes the PyPI page.
+
+Both artifacts fit PyPI's 100 MB per-file limit with ~12 MB to spare. A Linux
+x86-64 user the wheel misses (glibc older than the floor) falls back to the
+sdist: pip builds it during install and the result carries the same bundle.
+Anything else — macOS, Windows, other architectures — raises a clear error from
+`_require_supported_platform()` instead of trying to load a foreign ELF.
 
 ### Cache layout
 
-Root is `~/.cache/soda-stt` (override with `SODA_STT_HOME`):
+Root is `~/.cache/soda-stt` (override with `SODA_STT_HOME`). A bundled wheel
+never creates it — it only exists when something was downloaded:
 
 ```
 ~/.cache/soda-stt/
@@ -148,8 +212,9 @@ Root is `~/.cache/soda-stt` (override with `SODA_STT_HOME`):
   bin/soda_helper                # the native helper, compiled on first use
 ```
 
-Versioning by directory means a newer engine or pack installs side-by-side; the
-library resolves to the current version reported by the update service.
+Versioning by directory means a newer engine or pack installs side-by-side.
+Local copies are picked newest-first; the update service only decides which
+version to fetch when nothing is local yet.
 
 ### Wiring it to the engine
 
@@ -164,10 +229,8 @@ Adding a locale is just one line: its CRX id in `LANGUAGE_PACK_IDS`
 (`_config.py`). The id comes from that language's public-key hash in Chromium's
 `components/soda/constants.cc`.
 
-## Legal note
+## Note
 
 The engine and language packs are Google's property and carry Google's terms.
 `soda-stt` fetches and runs the same on-device components Chrome already
-downloads to your machine; it is an interoperability/research tool, not a
-redistribution of Google's models. Review Chrome's and Google's terms before
-relying on it beyond that.
+downloads to your machine; it is an interoperability/research tool for testing purposes.

@@ -7,11 +7,17 @@ __pycache__/
 
 # Native build output (compiled on first use)
 native/soda_helper
+src/soda_stt/soda_helper
+
+# Engine + models staged into the package by scripts/bundle.py (then shipped
+# in the wheel; the wheel is the artifact, not the git tree)
+src/soda_stt/_bundle/
 
 # Downloaded engine + models, and local caches (fetched on demand)
 artifacts/
 .soda_home/
 .cache/
+.scratch/
 
 # RE scratch and large test media
 probe/

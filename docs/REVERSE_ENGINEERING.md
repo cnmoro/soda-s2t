@@ -134,7 +134,7 @@ count is half the cores.
 
 ```
 Python (SodaRecognizer)
-  ├─ download.py       fetch + extract engine and model packs (Omaha/CRX3)
+  ├─ download.py       resolve engine + model packs: bundled → cache → Omaha/CRX3
   ├─ audio.py          ffmpeg -> 16 kHz mono s16le PCM (file/URL/stream)
   ├─ _config.py        build ExtendedSodaConfigMsg, hold key + flags
   └─ engine.py         spawn helper, pace stdin, parse SodaResponse stream

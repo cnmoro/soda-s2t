@@ -1,6 +1,6 @@
 [project]
 name = "soda-stt"
-version = "0.1.0"
+version = "0.1.1"
 description = "Chrome's on-device (offline) speech-to-text engine (SODA) as a Python library"
 readme = "README.md"
 authors = [
@@ -10,13 +10,42 @@ requires-python = ">=3.12"
 dependencies = [
     "protobuf>=5.29",
 ]
+classifiers = [
+    "Intended Audience :: Education",
+    "Intended Audience :: Developers",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.12",
+    "Operating System :: POSIX :: Linux",
+]
 
 [project.scripts]
 soda-stt = "soda_stt.cli:main"
 
 [build-system]
-requires = ["uv_build>=0.11.5,<0.12.0"]
-build-backend = "uv_build"
+# hatch_build.py tags the wheel py3-none-<platform>: once scripts/bundle.py has
+# staged libsoda.so the package is Linux x86-64 only, not universal.
+requires = ["hatchling>=1.27"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.hooks.custom]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/soda_stt"]
+# The bundle is gitignored (192 MB of Google's artifacts) but must ship in the
+# wheel, so VCS ignore rules are not consulted for wheel file selection.
+ignore-vcs = true
+exclude = ["**/__pycache__", "**/*.pyc", "**/*.pyo"]
+
+# The sdist ships the bundle too, so a source build (pip's fallback when no
+# wheel matches: older glibc, other architecture) produces a package just as
+# self-contained as the wheel. force-include bypasses the .gitignore that keeps
+# the 192 MB bundle and the compiled helper out of git.
+[tool.hatch.build.targets.sdist]
+exclude = ["**/__pycache__", "**/*.pyc", "**/*.pyo"]
+
+[tool.hatch.build.targets.sdist.force-include]
+"src/soda_stt/_bundle" = "src/soda_stt/_bundle"
+"src/soda_stt/soda_helper" = "src/soda_stt/soda_helper"
 
 [dependency-groups]
 dev = [

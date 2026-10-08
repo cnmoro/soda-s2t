@@ -1,7 +1,13 @@
-"""Fetch the SODA engine and language packs from Chrome's component updater.
+"""Resolve the SODA engine and language packs, downloading only if needed.
 
-No Chrome installation is required: the components are served publicly by
-Google's Omaha update service and are plain CRX3 archives (a signed-zip).
+Resolution is offline-first: a bundled copy (shipped inside the package by
+scripts/bundle.py) wins, then whatever a previous download left in the cache,
+and only then the component updater. When artifacts are bundled the network is
+never touched; see docs/MODEL.md.
+
+The download path needs no Chrome installation: the components are served
+publicly by Google's Omaha update service and are plain CRX3 archives
+(a signed-zip).
 """
 
 from __future__ import annotations
@@ -9,6 +15,8 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import platform
+import sys
 import urllib.request
 import zipfile
 from pathlib import Path
@@ -19,12 +27,82 @@ OMAHA_URL = "https://update.googleapis.com/service/update2/json"
 # A recent Chrome version string; the service keys responses off this.
 PRODVERSION = "141.0.7390.54"
 
+_BUNDLE_NAME = "_bundle"
+_BUNDLE_MANIFEST = "bundle.json"
+
 
 def _default_root() -> Path:
     base = os.environ.get("SODA_STT_HOME") or os.path.join(
         os.path.expanduser("~"), ".cache", "soda-stt"
     )
     return Path(base)
+
+
+def _bundle_root() -> Path:
+    return Path(__file__).resolve().parent / _BUNDLE_NAME
+
+
+# -- bundled artifacts ------------------------------------------------------
+
+
+def bundle_info() -> dict:
+    """Manifest of the artifacts shipped inside the package ({} if none)."""
+    path = _bundle_root() / _BUNDLE_MANIFEST
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+
+
+def bundled_engine() -> Path | None:
+    """Path to the bundled libsoda.so, or None if the package has no bundle."""
+    lib = _bundle_root() / "SODAFiles" / "libsoda.so"
+    return lib if lib.is_file() else None
+
+
+def bundled_language_pack(locale: str) -> Path | None:
+    """Path to a bundled language pack's SODAModels directory, or None."""
+    models = _bundle_root() / locale / "SODAModels"
+    return models if models.is_dir() else None
+
+
+# -- downloaded artifacts already on disk -----------------------------------
+
+
+def _version_key(version: str) -> tuple[int, ...]:
+    key = []
+    for piece in version.split("."):
+        key.append(int(piece) if piece.isdigit() else 0)
+    return tuple(key)
+
+
+def _newest(base: Path, required: tuple[str, ...]) -> Path | None:
+    """Newest version directory under `base` containing every path in `required`."""
+    if not base.is_dir():
+        return None
+    best: Path | None = None
+    for entry in base.iterdir():
+        if not entry.is_dir():
+            continue
+        if not all((entry / rel).exists() for rel in required):
+            continue
+        if best is None or _version_key(entry.name) > _version_key(best.name):
+            best = entry
+    return best
+
+
+def cached_engine(root: Path | None = None) -> Path | None:
+    """Newest previously downloaded engine, or None."""
+    root = root or _default_root()
+    entry = _newest(root / "engine", ("SODAFiles/libsoda.so",))
+    return entry / "SODAFiles" / "libsoda.so" if entry else None
+
+
+def cached_language_pack(locale: str, root: Path | None = None) -> Path | None:
+    """Newest previously downloaded language pack, or None."""
+    root = root or _default_root()
+    entry = _newest(root / "langpacks" / locale, ("SODAModels",))
+    return entry / "SODAModels" if entry else None
 
 
 def _query(app_id: str) -> dict:
@@ -78,10 +156,44 @@ def _extract_crx(crx: Path, out_dir: Path) -> None:
         zf.extractall(out_dir)
 
 
+def _require_supported_platform() -> None:
+    """The engine ships as a glibc Linux x86-64 ELF; fail loudly anywhere else.
+
+    A source install can land anywhere, and without this the first use would
+    either dlopen a foreign ELF or download components that cannot run here.
+    """
+    machine = platform.machine().lower()
+    if sys.platform != "linux" or machine not in ("x86_64", "amd64"):
+        raise RuntimeError(
+            "soda-stt needs glibc Linux x86-64 (libsoda.so is a Linux x86-64 "
+            f"ELF); this platform is {sys.platform}/{platform.machine()}."
+        )
+
+
 def ensure_engine(root: Path | None = None, *, force: bool = False) -> Path:
-    """Download+extract the SODA library. Returns the path to libsoda.so."""
+    """Return the path to libsoda.so, without hitting the network if possible.
+
+    Order: bundled copy, then the local cache, then a component-updater
+    download. `force=True` skips the local copies and checks for a newer build.
+    """
+    _require_supported_platform()
     root = root or _default_root()
-    info = _query(SODA_COMPONENT_ID)
+    if not force:
+        local = bundled_engine() or cached_engine(root)
+        if local is not None:
+            return local
+    try:
+        info = _query(SODA_COMPONENT_ID)
+    except Exception as exc:
+        local = bundled_engine() or cached_engine(root)
+        if local is not None:
+            return local
+        raise RuntimeError(
+            "no bundled or cached SODA engine, and the component update "
+            "service is unreachable. Build a bundled wheel "
+            "(uv run python scripts/bundle.py && uv build --wheel) or run `soda-stt download` "
+            "on a machine with network access."
+        ) from exc
     dest = root / "engine" / info["version"]
     lib = dest / "SODAFiles" / "libsoda.so"
     if lib.exists() and not force:
@@ -98,13 +210,33 @@ def ensure_engine(root: Path | None = None, *, force: bool = False) -> Path:
 def ensure_language_pack(
     locale: str, root: Path | None = None, *, force: bool = False
 ) -> Path:
-    """Download+extract a language pack. Returns its SODAModels directory."""
+    """Return the SODAModels directory for `locale`, network only as needed.
+
+    Same offline-first order as ensure_engine(): bundled copy, local cache,
+    component-updater download.
+    """
+    _require_supported_platform()
     root = root or _default_root()
     if locale not in LANGUAGE_PACK_IDS:
         raise ValueError(
             f"unknown locale {locale!r}; known: {sorted(LANGUAGE_PACK_IDS)}"
         )
-    info = _query(LANGUAGE_PACK_IDS[locale])
+    if not force:
+        local = bundled_language_pack(locale) or cached_language_pack(locale, root)
+        if local is not None:
+            return local
+    try:
+        info = _query(LANGUAGE_PACK_IDS[locale])
+    except Exception as exc:
+        local = bundled_language_pack(locale) or cached_language_pack(locale, root)
+        if local is not None:
+            return local
+        raise RuntimeError(
+            f"no bundled or cached {locale} language pack, and the component "
+            "update service is unreachable. Build a bundled wheel "
+            "(uv run python scripts/bundle.py && uv build --wheel) or run `soda-stt download` "
+            "on a machine with network access."
+        ) from exc
     dest = root / "langpacks" / locale / info["version"]
     models = dest / "SODAModels"
     if models.exists() and not force:

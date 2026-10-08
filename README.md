@@ -1,26 +1,33 @@
 # soda-stt
 
+> **For education and testing purposes.** This project exists to study and
+> exercise the on-device speech engine Chrome ships; see
+> [Legal note](#legal-note) below.
+
 Chrome's on-device (offline) speech-to-text engine — the one behind Live Caption
-and ChromeOS dictation — as a Python library. Runs fully offline after a
-one-time model download. No Chrome installation or network needed at inference
-time. First-class support for Brazilian Portuguese (`pt-BR`).
+and ChromeOS dictation — as a Python library. Runs fully offline. First-class
+support for Brazilian Portuguese (`pt-BR`).
 
 The engine is Google's **SODA** (Speech On-Device API), shipped as `libsoda.so`.
-This library downloads the engine and language models straight from Chrome's
-public component-update service, then drives the engine through a small native
-helper.
+This library can ship with the engine and language models **bundled inside the
+package**, so inference never touches the network; when they are not bundled, it
+downloads them once from Chrome's public component-update service and caches
+them. Either way it drives the engine through a small native helper.
 
 - [docs/MODEL.md](docs/MODEL.md) — how Google publishes the model, how it's
-  downloaded, and how it integrates here.
-- [docs/REVERSE_ENGINEERING.md](docs/REVERSE_ENGINEERING.md) — the engine ABI,
-  the "called by Chrome" gate, timestamps/diarization, and the fast path.
+  downloaded, bundled, and integrated here.
 
 ## Requirements
 
-- Linux x86-64 (the published SODA binary's platform)
+- Linux x86-64 on glibc. `libsoda.so` is a glibc Linux x86-64 ELF, so the
+  published wheel is tagged `manylinux_2_34_x86_64` (glibc ≥ 2.34: Ubuntu
+  22.04+, Debian 12+, Fedora 36+). Older glibc distros build from the source
+  distribution instead — `pip` does that automatically. macOS, Windows and
+  other architectures are unsupported and get a clear error, not a crash.
 - Python 3.12+
 - `ffmpeg` on `PATH` (used to decode any audio/video input)
-- A C compiler (`cc`) available once, to build the bundled helper on first use
+- A C compiler (`cc`) — only for a build made *without* a bundle; both
+  published artifacts ship the compiled helper
 
 ## Install
 
@@ -28,12 +35,31 @@ helper.
 pip install soda-stt      # or: uv add soda-stt
 ```
 
+Two artifacts are published, both self-contained (engine, pt-BR pack and
+helper included, ~92 MB each):
+
+| artifact | pip uses it when |
+|----------|------------------|
+| `soda_stt-…-py3-none-manylinux_2_34_x86_64.whl` | the platform matches (glibc ≥ 2.34) — installed directly |
+| `soda_stt-<version>.tar.gz` (source) | no wheel matches (older glibc) — **built during install**, same bundle inside |
+
+### Building the artifacts yourself
+
+```bash
+uv run python scripts/bundle.py   # stage engine + pt-BR from artifacts/ into the package
+scripts/build_release.sh          # manylinux wheel + sdist into dist/
+pip install dist/*.whl
+```
+
+`scripts/bundle.py --pack LOCALE=PATH.crx3` stages further locales; an artifact
+built *without* a bundle falls back to downloading components on first use.
+
 ## Use
 
 ```python
 from soda_stt import SodaRecognizer
 
-rec = SodaRecognizer.for_locale("pt-BR")   # downloads engine + models once
+rec = SodaRecognizer.for_locale("pt-BR")   # bundled, else cached, else downloaded once
 
 # Whole-file transcription (any ffmpeg-readable file or URL).
 # Fast by default: splits on silence and transcribes chunks in parallel.
@@ -72,7 +98,8 @@ See [`examples/`](examples/) for a live **microphone** script and a
 ### Command line
 
 ```bash
-soda-stt download --locale pt-BR               # pre-fetch engine + models
+soda-stt download --locale pt-BR               # make engine + models available locally
+soda-stt download --locale pt-BR --force       # ...and check the update service for newer ones
 soda-stt transcribe entrevista.mp3             # plain text (fast parallel)
 soda-stt transcribe entrevista.mp3 -f srt -o out.srt   # subtitles with timecodes
 soda-stt transcribe entrevista.mp3 -f json     # segments + word timestamps + speakers
@@ -115,11 +142,15 @@ everything is speaker 1.
 ## Languages
 
 `pt-BR` and `en-US` are wired up by CRX id. Other locales SODA supports can be
-added in `soda_stt/_config.py` (`LANGUAGE_PACK_IDS`).
+added in `soda_stt/_config.py` (`LANGUAGE_PACK_IDS`). Locales that aren't
+bundled or cached are fetched from the update service on first use; to bundle
+one too, stage it with `scripts/bundle.py --pack <locale>=<crx3>` before
+building the artifacts.
 
 ## Legal note
 
-This project downloads and runs Google's SODA engine and language models, which
-are Google's property and carry their own terms. It is an interoperability /
-research tool for running the on-device engine you already receive with Chrome.
-Review Chrome's and Google's terms before relying on it beyond that.
+**This project is published for education and testing purposes.** It downloads,
+bundles and runs Google's SODA engine and language models, which are Google's
+property and carry their own terms. It is an interoperability / research tool
+for the on-device speech engine you already receive with Chrome. Review Chrome's
+and Google's terms before relying on it beyond education and testing.
