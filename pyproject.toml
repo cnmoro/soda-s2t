@@ -1,6 +1,6 @@
 [project]
 name = "soda-stt"
-version = "0.1.1"
+version = "0.1.2"
 description = "Chrome's on-device (offline) speech-to-text engine (SODA) as a Python library"
 readme = "README.md"
 authors = [
@@ -17,6 +17,9 @@ classifiers = [
     "Programming Language :: Python :: 3.12",
     "Operating System :: POSIX :: Linux",
 ]
+
+[project.urls]
+Repository = "https://github.com/cnmoro/soda-s2t"
 
 [project.scripts]
 soda-stt = "soda_stt.cli:main"
