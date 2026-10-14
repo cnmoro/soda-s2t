@@ -100,11 +100,10 @@ def _find_helper() -> str:
 
 @dataclass
 class Word:
-    """A single recognized word with timing and speaker label."""
+    """A single recognized word with its start time."""
 
     text: str
     start_ms: int           # start time within the audio, in milliseconds
-    speaker: int = 1        # 1-indexed speaker label (SODA default is 1)
 
     def __str__(self) -> str:  # pragma: no cover
         return self.text
@@ -142,7 +141,6 @@ def _extract_words(
             Word(
                 text=part.text[0],
                 start_ms=_map_time(time_map, base_ms + part.alignment_ms, offset_ms),
-                speaker=part.speaker_label or 1,
             )
         )
     return words
@@ -177,7 +175,6 @@ class SodaRecognizer:
         recognition_mode: int = _config.MODE_CAPTION,
         enable_formatting: bool = True,
         mask_offensive_words: bool = False,
-        max_speaker_count: int = 0,
     ) -> None:
         self.language_pack_directory = str(language_pack_directory)
         self.libsoda_path = libsoda_path or str(ensure_engine())
@@ -187,7 +184,6 @@ class SodaRecognizer:
             recognition_mode=recognition_mode,
             enable_formatting=enable_formatting,
             mask_offensive_words=mask_offensive_words,
-            max_speaker_count=max_speaker_count,
         )
 
     @classmethod
@@ -323,7 +319,7 @@ class SodaRecognizer:
 
         Splits the audio at silences into <= max_chunk_s chunks and transcribes
         them in parallel, stitching results into one global timeline. Each
-        Result carries text, word timestamps and speaker labels.
+        Result carries text and word timestamps.
 
         Each chunk's feed is paced (realtime_factor) for completeness; the speed
         comes from running many chunks at once. Paced workers mostly wait, so the

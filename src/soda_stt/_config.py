@@ -45,7 +45,6 @@ def build_config(
     recognition_mode: int = MODE_CAPTION,
     enable_formatting: bool = True,
     mask_offensive_words: bool = False,
-    max_speaker_count: int = 0,
 ) -> bytes:
     """Serialize an ExtendedSodaConfigMsg for the given language pack."""
     cfg = pb.ExtendedSodaConfigMsg(
@@ -58,9 +57,4 @@ def build_config(
         mask_offensive_words=mask_offensive_words,
         simulate_realtime_testonly=False,
     )
-    if max_speaker_count > 0:
-        cfg.speaker_diarization_mode = (
-            pb.ExtendedSodaConfigMsg.SPEAKER_LABEL_DETECTION
-        )
-        cfg.max_speaker_count = max_speaker_count
     return cfg.SerializeToString()

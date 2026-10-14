@@ -29,8 +29,7 @@ def _emit_srt(segs: list[Result]) -> str:
             nxt = segs[i]
             nxt_start = nxt.words[0].start_ms if nxt.words else nxt.start_ms
             end = min(end, max(nxt_start - 1, start + 1))
-        spk = f"[S{seg.words[0].speaker}] " if seg.words else ""
-        lines.append(f"{i}\n{_fmt_ts(start)} --> {_fmt_ts(end)}\n{spk}{seg.text.strip()}\n")
+        lines.append(f"{i}\n{_fmt_ts(start)} --> {_fmt_ts(end)}\n{seg.text.strip()}\n")
     return "\n".join(lines)
 
 
@@ -40,7 +39,7 @@ def _emit_json(segs: list[Result]) -> str:
             "start_ms": seg.start_ms,
             "text": seg.text,
             "words": [
-                {"text": w.text, "start_ms": w.start_ms, "speaker": w.speaker}
+                {"text": w.text, "start_ms": w.start_ms}
                 for w in seg.words
             ],
         }
@@ -71,10 +70,6 @@ def main(argv: list[str] | None = None) -> int:
         "--workers", type=int, default=None, help="parallel workers (default: cores/2)",
     )
     p_tr.add_argument(
-        "--max-speakers", type=int, default=0,
-        help="enable speaker diarization with up to N speakers (experimental)",
-    )
-    p_tr.add_argument(
         "--no-fast", action="store_true",
         help="use single-session paced streaming instead of parallel chunking",
     )
@@ -103,7 +98,7 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     if args.cmd == "transcribe":
-        rec = SodaRecognizer.for_locale(args.locale, max_speaker_count=args.max_speakers)
+        rec = SodaRecognizer.for_locale(args.locale)
 
         # None → each path's own default (6x parallel, 8x single session);
         # passing None to the engine itself would mean "no pacing at all".

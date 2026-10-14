@@ -70,9 +70,3 @@ def test_plan_chunks_hard_splits_without_silence():
     plan = ck.plan_chunks(90.0, [], max_chunk_s=28.0)
     assert all(c.end_s - c.start_s <= 28.0 + 1e-6 for c in plan)
     assert len(plan) >= 3
-
-
-def test_speaker_label_field_present_in_proto():
-    from soda_stt import soda_api_pb2 as pb
-    names = [f.name for f in pb.HypothesisPart.DESCRIPTOR.fields]
-    assert "speaker_label" in names

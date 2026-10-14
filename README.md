@@ -76,7 +76,7 @@ On an 8-core desktop a 55-minute recording transcribes in about 86 seconds
 for seg in rec.transcribe_detailed("entrevista.mp3"):
     print(f"[{seg.start_ms/1000:.1f}s] {seg.text}")
     for w in seg.words:
-        print(f"    {w.start_ms/1000:6.2f}s  {w.text}  (speaker {w.speaker})")
+        print(f"    {w.start_ms/1000:6.2f}s  {w.text}")
 ```
 
 ### Live streaming (in order, as it arrives)
@@ -92,8 +92,7 @@ Raw PCM (16 kHz, mono, s16le) if you already have samples:
 text = rec.transcribe_pcm(pcm_bytes)
 ```
 
-See [`examples/`](examples/) for a live **microphone** script and a
-**diarization** script.
+See [`examples/`](examples/) for a live **microphone** script.
 
 ### Command line
 
@@ -102,8 +101,7 @@ soda-stt download --locale pt-BR               # make engine + models available 
 soda-stt download --locale pt-BR --force       # ...and check the update service for newer ones
 soda-stt transcribe entrevista.mp3             # plain text (fast parallel)
 soda-stt transcribe entrevista.mp3 -f srt -o out.srt   # subtitles with timecodes
-soda-stt transcribe entrevista.mp3 -f json     # segments + word timestamps + speakers
-soda-stt transcribe call.wav --max-speakers 4  # experimental diarization
+soda-stt transcribe entrevista.mp3 -f json     # segments + word timestamps
 soda-stt transcribe long.mp3 --workers 4       # tune parallelism
 soda-stt transcribe odd.aac --no-fast          # single-session paced streaming
 ```
@@ -137,16 +135,6 @@ frames as for speech. Both shape the design:
 For a live microphone you already produce audio in real time, so pass
 `realtime_factor=None` to `stream_pcm` and feed chunks as they arrive (see
 `examples/microphone.py`).
-
-## Speaker diarization (experimental)
-
-The engine tags each word with a speaker label, exposed as `Word.speaker`
-(1-indexed). Enable it with `SodaRecognizer.for_locale(..., max_speaker_count=N)`
-and read labels from `transcribe_detailed()` or `stream()`. Speaker numbering is
-only consistent within a single session, so use `stream()` (not the parallel
-path) when you care about who-said-what across a whole recording. Quality is
-model-dependent: clean, turn-taking audio works best; on single-speaker audio
-everything is speaker 1.
 
 ## Languages
 
